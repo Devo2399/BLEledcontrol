@@ -21,7 +21,7 @@
         .btn-reconnect { background: #03dac6; color: #000; margin-top: 10px; }
         
         .control-group { display: flex; align-items: center; justify-content: space-between; margin: 10px 0; gap: 10px; }
-        .control-group label { flex-shrink: 0; width: 85px; font-size: 0.9rem; }
+        .control-group label { flex-shrink: 0; width: 80px; font-size: 0.9rem; }
         input[type="color"] { width: 40px; height: 35px; border: none; background: none; cursor: pointer; padding: 0; }
         select { flex-grow: 1; padding: 8px; border-radius: 5px; background: #333; color: white; border: 1px solid #555; }
         input[type="range"] { flex-grow: 1; cursor: pointer; }
@@ -53,35 +53,13 @@
             <label>Master Color:</label>
             <input type="color" id="globalColor" value="#ff0000">
             <select id="globalPresetColors">
-                <option value="">-- Color Presets --</option>
+                <option value="">-- Presets --</option>
             </select>
         </div>
-        
-        <div class="control-group">
-            <label>Master Effect:</label>
-            <select id="globalEffect">
-                <option value="">-- Choose Effect --</option>
-                <optgroup label="Leaves when you close app">
-                    <option value="static">Solid Color</option>
-                    <option value="flash">Software Strobe</option>
-                    <option value="smooth_rainbow">Software Rainbow</option>
-                </optgroup>
-                <optgroup label="Stays when you close app">
-                    <option value="hw_rainbow">Hardware Rainbow Fade</option>
-                </optgroup>
-            </select>
-        </div>
-
         <div class="control-group">
             <label>Brightness:</label>
-            <input type="range" id="globalBrightness" min="0" max="100" value="100" title="Brightness">
+            <input type="range" id="globalBrightness" min="0" max="100" value="100">
         </div>
-
-        <div class="control-group">
-            <label>Effect Speed:</label>
-            <input type="range" id="globalSpeed" min="1" max="100" value="50" title="Effect Speed">
-        </div>
-
         <div class="btn-row">
             <button id="globalOnBtn" class="btn-on">Turn All ON</button>
             <button id="globalOffBtn" class="btn-off">Turn All OFF</button>
@@ -217,12 +195,13 @@
             // Hardware Effect Logic
             if (strip.effectMode.startsWith("hw_")) {
                 let hwSpeed = Math.max(1, Math.min(100, 101 - strip.effectSpeed)); 
-                let modeCode = 0x87; // Rainbow Fade
+                let modeCode = 0x87; 
+                
                 let hardwarePayloads = [
                     new Uint8Array([0x7e, 0x00, 0x03, modeCode, hwSpeed, 0x00, 0xff, 0x00, 0xef])
                 ];
                 sendData(strip.characteristic, hardwarePayloads);
-                return; // Hardware takes over
+                return; 
             }
 
             // Software Effect Logic
@@ -250,7 +229,7 @@
             }
         }
 
-        // --- 4. DEVICE MANAGEMENT & RECONNECTION ---
+        // --- 4. DEVICE MANAGEMENT ---
         async function establishConnection(device, stripObj) {
             globalStatus.innerText = `Connecting to ${stripObj.customName}...`;
             const server = await device.gatt.connect();
@@ -407,10 +386,6 @@
             if (brightEl) brightEl.value = strip.currentBrightness;
             const selectEl = document.getElementById(`preset-${strip.id}`);
             if (selectEl && !Object.values(PRESETS).includes(strip.currentColor.toLowerCase())) selectEl.value = "";
-            const effectEl = document.getElementById(`effect-${strip.id}`);
-            if (effectEl) effectEl.value = strip.effectMode;
-            const speedEl = document.getElementById(`speed-${strip.id}`);
-            if (speedEl) speedEl.value = strip.effectSpeed;
         }
 
         function renderDeviceCards() {
@@ -464,9 +439,6 @@
                                     <option value="hw_rainbow">Hardware Rainbow Fade</option>
                                 </optgroup>
                             </select>
-                        </div>
-                        <div class="control-group">
-                            <label>Speed:</label>
                             <input type="range" min="1" max="100" value="${strip.effectSpeed}" id="speed-${strip.id}" title="Speed">
                         </div>
                         <div class="btn-row">
@@ -486,8 +458,8 @@
                 deviceContainer.appendChild(card);
 
                 if (strip.isConnected) {
-                    // Update all visuals initially to ensure they match state
-                    updateCardVisuals(strip);
+                    document.getElementById(`preset-${strip.id}`).value = Object.values(PRESETS).includes(strip.currentColor.toLowerCase()) ? strip.currentColor : "";
+                    document.getElementById(`effect-${strip.id}`).value = strip.effectMode;
 
                     document.getElementById(`color-${strip.id}`).addEventListener('input', (e) => setStripState(strip, true, e.target.value, null));
                     document.getElementById(`preset-${strip.id}`).addEventListener('change', (e) => {
@@ -524,20 +496,15 @@
                 renderDeviceCards();
             }
         });
-        document.getElementById('globalEffect').addEventListener('change', (e) => {
-            if(e.target.value) {
-                connectedStrips.forEach(s => { 
-                    s.effectMode = e.target.value; 
-                    setStripState(s, true); 
-                });
-                renderDeviceCards();
-            }
-        });
         document.getElementById('globalBrightness').addEventListener('input', (e) => {
             connectedStrips.forEach(s => setStripState(s, true, null, e.target.value));
         });
-        document.getElementById('globalSpeed').addEventListener('input', (e) => {
-            connectedStrips.forEach(s => {
-                s.effectSpeed = e.target.value;
-                s.isOn = true;
-                saveProfile
+        document.getElementById('globalOnBtn').addEventListener('click', () => {
+            connectedStrips.forEach(s => setStripState(s, true));
+        });
+        document.getElementById('globalOffBtn').addEventListener('click', () => {
+            connectedStrips.forEach(s => setStripState(s, false));
+        });
+    </script>
+</body>
+</html>
