@@ -9,6 +9,7 @@
         h1, h2, h3 { color: #ffffff; text-align: center; margin: 10px 0; }
         .panel { background: #1e1e1e; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.6); width: 100%; max-width: 600px; margin-bottom: 20px; }
         .device-card { background: #2a2a2a; border-left: 5px solid #6200ee; padding: 15px; margin-top: 15px; border-radius: 8px; }
+        .offline-card { border-left: 5px solid #555; opacity: 0.8; }
         
         button { background: #6200ee; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; margin: 5px 0; transition: background 0.3s; }
         button:hover { background: #7c4dff; }
@@ -17,6 +18,7 @@
         .btn-on:hover { background: #5df2d6; }
         .btn-off { background: #cf6679; color: #000; }
         .btn-off:hover { background: #ff7597; }
+        .btn-reconnect { background: #03dac6; color: #000; margin-top: 10px; }
         
         .control-group { display: flex; align-items: center; justify-content: space-between; margin: 10px 0; gap: 10px; }
         .control-group label { flex-shrink: 0; width: 80px; font-size: 0.9rem; }
@@ -42,7 +44,7 @@
     <div class="panel">
         <h2>Global Controls</h2>
         <button id="addDeviceBtn">+ Pair New LED Strip</button>
-        <div class="status-text" id="globalStatus">0 Devices Connected</div>
+        <div class="status-text" id="globalStatus">Checking for saved devices...</div>
         
         <hr style="border-color: #333; margin: 15px 0;">
         
@@ -74,7 +76,6 @@
         const SERVICES = [0xFFD0, 0xFFE0, 0xFFB0, 0xFFF0, '0000ffd0-0000-1000-8000-00805f9b34fb'];
         const CHARS = [0xFFD5, 0xFFE1, 0xFFF3, 0xFFF4];
 
-        // 16 Standard Remote Colors
         const PRESETS = {
             "Red": "#ff0000", "Green": "#00ff00", "Blue": "#0000ff", "White": "#ffffff",
             "Orange": "#ff6600", "Yellow": "#ffff00", "Cyan": "#00ffff", "Magenta": "#ff00ff",
@@ -86,22 +87,60 @@
         const deviceListPanel = document.getElementById('deviceListPanel');
         const deviceContainer = document.getElementById('deviceContainer');
 
-        // Populate Global Preset Dropdown
         const globalPresetSelect = document.getElementById('globalPresetColors');
         for (const [name, hex] of Object.entries(PRESETS)) {
             globalPresetSelect.innerHTML += `<option value="${hex}">${name}</option>`;
         }
 
-        // Save state to Local Storage
+        // Save complete state to Local Storage
         function saveProfile(strip) {
             let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
             saved[strip.id] = { 
                 name: strip.customName, 
                 color: strip.currentColor, 
-                bright: strip.currentBrightness 
+                bright: strip.currentBrightness,
+                isOn: strip.isOn,
+                effectMode: strip.effectMode,
+                effectSpeed: strip.effectSpeed
             };
             localStorage.setItem('yorick_led_profiles', JSON.stringify(saved));
         }
+
+        // Initialize known devices on page load
+        window.addEventListener('load', async () => {
+            if (navigator.bluetooth && navigator.bluetooth.getDevices) {
+                try {
+                    const devices = await navigator.bluetooth.getDevices();
+                    let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
+
+                    for (let device of devices) {
+                        if (saved[device.id]) {
+                            let profile = saved[device.id];
+                            let stripObj = {
+                                id: device.id,
+                                customName: profile.name || "Saved Strip",
+                                device: device,
+                                characteristic: null, 
+                                currentColor: profile.color || "#ffffff",
+                                currentBrightness: profile.bright || 100,
+                                isOn: profile.isOn ?? false,
+                                effectMode: profile.effectMode || "static",
+                                effectSpeed: profile.effectSpeed || 50,
+                                effectTimer: null,
+                                isConnected: false // Offline initially
+                            };
+                            connectedStrips.push(stripObj);
+                        }
+                    }
+                    renderDeviceCards();
+                    globalStatus.innerText = connectedStrips.length > 0 ? "Saved devices loaded." : "0 Devices Connected";
+                } catch (e) {
+                    console.error("Auto-load failed", e);
+                }
+            } else {
+                globalStatus.innerText = "0 Devices Connected (Auto-reconnect not supported in this browser)";
+            }
+        });
 
         // --- 2. HARDWARE COMMUNICATION ---
         function createPayloads(hexColor, brightnessPercent) {
@@ -122,6 +161,7 @@
         ];
 
         async function sendData(characteristic, payloadsArray) {
+            if (!characteristic) return;
             for (let data of payloadsArray) {
                 try {
                     await characteristic.writeValue(data);
@@ -131,13 +171,33 @@
         }
 
         // --- 3. SOFTWARE EFFECTS ENGINE ---
+        // Helper: Convert HSL to RGB for smooth transitions
+        function hslToRgb(h, s, l) {
+            let r, g, b;
+            if (s === 0) {
+                r = g = b = l; 
+            } else {
+                const hue2rgb = (p, q, t) => {
+                    if (t < 0) t += 1; if (t > 1) t -= 1;
+                    if (t < 1/6) return p + (q - p) * 6 * t;
+                    if (t < 1/2) return q;
+                    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                    return p;
+                };
+                const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+                const p = 2 * l - q;
+                r = hue2rgb(p, q, h + 1/3); g = hue2rgb(p, q, h); b = hue2rgb(p, q, h - 1/3);
+            }
+            return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+        }
+
         function applyEffect(strip) {
             if (strip.effectTimer) clearInterval(strip.effectTimer);
-            if (strip.effectMode === "static" || !strip.isOn) return;
+            if (strip.effectMode === "static" || !strip.isOn || !strip.isConnected) return;
 
             let tick = 0;
-            // Map speed 1-100 to milliseconds (100 = fast 150ms, 1 = slow 1150ms)
-            let speedMs = 1150 - (strip.effectSpeed * 10); 
+            // Smooth effects need a fast update rate, choppy effects use a slower rate based on the slider
+            let speedMs = strip.effectMode === "smooth_rainbow" ? Math.max(20, 100 - strip.effectSpeed) : Math.max(150, 1150 - (strip.effectSpeed * 10)); 
             
             strip.effectTimer = setInterval(() => {
                 tick++;
@@ -148,8 +208,14 @@
                     const rainbow = ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"];
                     let c = rainbow[tick % 6];
                     sendData(strip.characteristic, createPayloads(c, strip.currentBrightness));
+                } else if (strip.effectMode === "smooth_rainbow") {
+                    // Smoothly rotate hue from 0 to 1
+                    let h = (tick % 360) / 360;
+                    let [r, g, b] = hslToRgb(h, 1, 0.5);
+                    let hex = "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+                    sendData(strip.characteristic, createPayloads(hex, strip.currentBrightness));
                 }
-            }, Math.max(150, speedMs));
+            }, speedMs);
         }
 
         function stopEffect(strip) {
@@ -159,24 +225,49 @@
             }
         }
 
-        // --- 4. DEVICE MANAGEMENT ---
+        // --- 4. DEVICE MANAGEMENT & RECONNECTION ---
+        async function establishConnection(device, stripObj) {
+            globalStatus.innerText = `Connecting to ${stripObj.customName}...`;
+            const server = await device.gatt.connect();
+            
+            let service = null;
+            for (const uuid of SERVICES) { try { service = await server.getPrimaryService(uuid); if (service) break; } catch (e) {} }
+            let writeChar = null;
+            for (const uuid of CHARS) { try { writeChar = await service.getCharacteristic(uuid); if (writeChar) break; } catch (e) {} }
+            if (!writeChar) throw new Error("No write permissions.");
+
+            stripObj.characteristic = writeChar;
+            stripObj.isConnected = true;
+            
+            device.addEventListener('gattserverdisconnected', () => handleDisconnect(device.id));
+            
+            renderDeviceCards();
+            globalStatus.innerText = `Connected: ${stripObj.customName}`;
+            
+            // Restore previous state automatically upon reconnection!
+            if (stripObj.isOn) {
+                if (stripObj.effectMode === "static") {
+                    sendData(writeChar, createPayloads(stripObj.currentColor, stripObj.currentBrightness));
+                } else {
+                    applyEffect(stripObj);
+                }
+            } else {
+                sendData(writeChar, payloadOff);
+            }
+        }
+
         document.getElementById('addDeviceBtn').addEventListener('click', async () => {
             try {
-                globalStatus.innerText = "Scanning...";
                 const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
-
-                if (connectedStrips.find(s => s.device.id === device.id)) return;
-
-                globalStatus.innerText = `Connecting to ${device.name}...`;
-                const server = await device.gatt.connect();
                 
-                let service = null;
-                for (const uuid of SERVICES) { try { service = await server.getPrimaryService(uuid); if (service) break; } catch (e) {} }
-                let writeChar = null;
-                for (const uuid of CHARS) { try { writeChar = await service.getCharacteristic(uuid); if (writeChar) break; } catch (e) {} }
-                if (!writeChar) throw new Error("No write permissions.");
+                // If it exists in our known list, just connect it
+                let existingStrip = connectedStrips.find(s => s.device.id === device.id);
+                if (existingStrip) {
+                    await establishConnection(device, existingStrip);
+                    return;
+                }
 
-                // Check Local Storage for saved data
+                // Brand new device setup
                 let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
                 let profile = saved[device.id] || { name: device.name || "New Strip", color: "#ffffff", bright: 100 };
 
@@ -184,28 +275,19 @@
                     id: device.id,
                     customName: profile.name,
                     device: device,
-                    characteristic: writeChar,
+                    characteristic: null,
                     currentColor: profile.color,
                     currentBrightness: profile.bright,
                     isOn: true,
                     effectMode: "static",
                     effectSpeed: 50,
-                    effectTimer: null
+                    effectTimer: null,
+                    isConnected: false
                 };
                 
                 connectedStrips.push(stripObj);
                 saveProfile(stripObj);
-                
-                device.addEventListener('gattserverdisconnected', () => {
-                    stopEffect(stripObj);
-                    connectedStrips = connectedStrips.filter(s => s.device.id !== device.id);
-                    renderDeviceCards();
-                    globalStatus.innerText = "Device disconnected.";
-                });
-
-                renderDeviceCards();
-                globalStatus.innerText = `Connected: ${stripObj.customName}`;
-                sendData(writeChar, createPayloads(stripObj.currentColor, stripObj.currentBrightness));
+                await establishConnection(device, stripObj);
 
             } catch (err) {
                 console.error(err);
@@ -213,13 +295,43 @@
             }
         });
 
-        function disconnectDevice(deviceId) {
+        // Triggered by clicking "Reconnect" on an offline card
+        async function reconnectDevice(deviceId) {
+            const strip = connectedStrips.find(s => s.id === deviceId);
+            if (strip && strip.device) {
+                try {
+                    await establishConnection(strip.device, strip);
+                } catch (e) {
+                    alert("Could not reconnect. Make sure the device is plugged in and nearby.");
+                }
+            }
+        }
+
+        function handleDisconnect(deviceId) {
             const strip = connectedStrips.find(s => s.device.id === deviceId);
-            if (strip && strip.device.gatt.connected) strip.device.gatt.disconnect();
+            if (strip) {
+                stopEffect(strip);
+                strip.isConnected = false;
+                strip.characteristic = null;
+                renderDeviceCards();
+                globalStatus.innerText = `${strip.customName} disconnected.`;
+            }
+        }
+
+        function forgetDevice(deviceId) {
+            const strip = connectedStrips.find(s => s.id === deviceId);
+            if (strip && strip.isConnected && strip.device.gatt.connected) strip.device.gatt.disconnect();
+            
+            connectedStrips = connectedStrips.filter(s => s.id !== deviceId);
+            let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
+            delete saved[deviceId];
+            localStorage.setItem('yorick_led_profiles', JSON.stringify(saved));
+            
+            renderDeviceCards();
         }
 
         function renameDevice(deviceId) {
-            const strip = connectedStrips.find(s => s.device.id === deviceId);
+            const strip = connectedStrips.find(s => s.id === deviceId);
             if (strip) {
                 const newName = prompt("Enter a new name for this zone:", strip.customName);
                 if (newName && newName.trim() !== "") {
@@ -232,6 +344,8 @@
 
         // --- 5. UI UPDATES & EVENTS ---
         function setStripState(strip, isOn, color = null, bright = null) {
+            if (!strip.isConnected) return; // Ignore offline clicks
+
             strip.isOn = isOn;
             if (color) strip.currentColor = color;
             if (bright) strip.currentBrightness = bright;
@@ -252,6 +366,7 @@
         }
 
         function updateCardVisuals(strip) {
+            if (!strip.isConnected) return;
             const badge = document.getElementById(`badge-${strip.id}`);
             if (badge) {
                 badge.innerText = strip.isOn ? "ON" : "OFF";
@@ -279,67 +394,82 @@
 
             connectedStrips.forEach(strip => {
                 const card = document.createElement('div');
-                card.className = 'device-card';
-                card.innerHTML = `
+                card.className = `device-card ${strip.isConnected ? '' : 'offline-card'}`;
+                
+                let cardContent = `
                     <div class="device-header">
                         <div class="name-group">
                             <span class="device-name" title="Click to rename" onclick="renameDevice('${strip.id}')">${strip.customName} ✎</span>
-                            <span class="status-badge" id="badge-${strip.id}">ON</span>
+                            <span class="status-badge" id="badge-${strip.id}" style="background-color: ${strip.isConnected ? (strip.isOn ? '#03dac6' : '#cf6679') : '#555'}">
+                                ${strip.isConnected ? (strip.isOn ? 'ON' : 'OFF') : 'OFFLINE'}
+                            </span>
                         </div>
-                        <button class="disconnect-btn" onclick="disconnectDevice('${strip.id}')">Disconnect</button>
-                    </div>
-                    
-                    <div class="control-group">
-                        <label>Color:</label>
-                        <input type="color" value="${strip.currentColor}" id="color-${strip.id}">
-                        <select id="preset-${strip.id}">${presetOptions}</select>
-                    </div>
-                    
-                    <div class="control-group">
-                        <label>Brightness:</label>
-                        <input type="range" min="0" max="100" value="${strip.currentBrightness}" id="bright-${strip.id}">
-                    </div>
-
-                    <div class="control-group">
-                        <label>Effect:</label>
-                        <select id="effect-${strip.id}">
-                            <option value="static">Solid Color</option>
-                            <option value="flash">Strobe / Flash</option>
-                            <option value="rainbow">Rainbow Cycle</option>
-                        </select>
-                        <input type="range" min="1" max="100" value="${strip.effectSpeed}" id="speed-${strip.id}" title="Speed">
-                    </div>
-                    
-                    <div class="btn-row">
-                        <button id="on-${strip.id}" class="btn-on">ON</button>
-                        <button id="off-${strip.id}" class="btn-off">OFF</button>
                     </div>
                 `;
+
+                // If online, show controls. If offline, show reconnect button.
+                if (strip.isConnected) {
+                    cardContent += `
+                        <div class="control-group">
+                            <label>Color:</label>
+                            <input type="color" value="${strip.currentColor}" id="color-${strip.id}">
+                            <select id="preset-${strip.id}">${presetOptions}</select>
+                        </div>
+                        <div class="control-group">
+                            <label>Brightness:</label>
+                            <input type="range" min="0" max="100" value="${strip.currentBrightness}" id="bright-${strip.id}">
+                        </div>
+                        <div class="control-group">
+                            <label>Effect:</label>
+                            <select id="effect-${strip.id}">
+                                <option value="static">Solid Color</option>
+                                <option value="flash">Strobe / Flash</option>
+                                <option value="rainbow">Choppy Rainbow</option>
+                                <option value="smooth_rainbow">Smooth Rainbow</option>
+                            </select>
+                            <input type="range" min="1" max="100" value="${strip.effectSpeed}" id="speed-${strip.id}" title="Speed">
+                        </div>
+                        <div class="btn-row">
+                            <button id="on-${strip.id}" class="btn-on">ON</button>
+                            <button id="off-${strip.id}" class="btn-off">OFF</button>
+                        </div>
+                        <button class="disconnect-btn" style="margin-top:10px; width:100%;" onclick="forgetDevice('${strip.id}')">Disconnect & Forget</button>
+                    `;
+                } else {
+                    cardContent += `
+                        <button class="btn-reconnect" onclick="reconnectDevice('${strip.id}')">🔄 Reconnect to Device</button>
+                        <button class="disconnect-btn" style="margin-top:5px; width:100%; border:none;" onclick="forgetDevice('${strip.id}')">Remove from list</button>
+                    `;
+                }
+                
+                card.innerHTML = cardContent;
                 deviceContainer.appendChild(card);
 
-                // Set initial select values
-                document.getElementById(`preset-${strip.id}`).value = Object.values(PRESETS).includes(strip.currentColor.toLowerCase()) ? strip.currentColor : "";
-                document.getElementById(`effect-${strip.id}`).value = strip.effectMode;
+                if (strip.isConnected) {
+                    document.getElementById(`preset-${strip.id}`).value = Object.values(PRESETS).includes(strip.currentColor.toLowerCase()) ? strip.currentColor : "";
+                    document.getElementById(`effect-${strip.id}`).value = strip.effectMode;
 
-                // Event Listeners
-                document.getElementById(`color-${strip.id}`).addEventListener('input', (e) => setStripState(strip, true, e.target.value, null));
-                document.getElementById(`preset-${strip.id}`).addEventListener('change', (e) => {
-                    if(e.target.value) setStripState(strip, true, e.target.value, null);
-                });
-                document.getElementById(`bright-${strip.id}`).addEventListener('input', (e) => setStripState(strip, true, null, e.target.value));
-                
-                document.getElementById(`effect-${strip.id}`).addEventListener('change', (e) => {
-                    strip.effectMode = e.target.value;
-                    setStripState(strip, true);
-                });
-                document.getElementById(`speed-${strip.id}`).addEventListener('input', (e) => {
-                    strip.effectSpeed = e.target.value;
-                    if(strip.effectMode !== "static") applyEffect(strip);
-                });
+                    // Event Listeners
+                    document.getElementById(`color-${strip.id}`).addEventListener('input', (e) => setStripState(strip, true, e.target.value, null));
+                    document.getElementById(`preset-${strip.id}`).addEventListener('change', (e) => {
+                        if(e.target.value) setStripState(strip, true, e.target.value, null);
+                    });
+                    document.getElementById(`bright-${strip.id}`).addEventListener('input', (e) => setStripState(strip, true, null, e.target.value));
+                    
+                    document.getElementById(`effect-${strip.id}`).addEventListener('change', (e) => {
+                        strip.effectMode = e.target.value;
+                        setStripState(strip, true);
+                    });
+                    document.getElementById(`speed-${strip.id}`).addEventListener('input', (e) => {
+                        strip.effectSpeed = e.target.value;
+                        strip.isOn = true;
+                        saveProfile(strip);
+                        if(strip.effectMode !== "static") applyEffect(strip);
+                    });
 
-                document.getElementById(`on-${strip.id}`).addEventListener('click', () => setStripState(strip, true));
-                document.getElementById(`off-${strip.id}`).addEventListener('click', () => setStripState(strip, false));
-                updateCardVisuals(strip);
+                    document.getElementById(`on-${strip.id}`).addEventListener('click', () => setStripState(strip, true));
+                    document.getElementById(`off-${strip.id}`).addEventListener('click', () => setStripState(strip, false));
+                }
             });
         }
 
@@ -352,7 +482,7 @@
             if(e.target.value) {
                 document.getElementById('globalColor').value = e.target.value;
                 connectedStrips.forEach(s => { s.effectMode = "static"; setStripState(s, true, e.target.value, null); });
-                renderDeviceCards();
+                renderDevice/Cards();
             }
         });
         document.getElementById('globalBrightness').addEventListener('input', (e) => {
