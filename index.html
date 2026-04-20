@@ -27,11 +27,12 @@
         input[type="range"] { flex-grow: 1; cursor: pointer; }
         
         .status-text { font-size: 0.85rem; color: #bb86fc; text-align: center; margin-top: 10px; }
-        .device-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; border-bottom: 1px solid #444; padding-bottom: 10px; }
-        .name-group { display: flex; align-items: center; gap: 10px; }
+        .device-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; border-bottom: 1px solid #444; padding-bottom: 10px; }
+        .name-group { display: flex; flex-direction: column; gap: 2px; }
         .device-name { font-weight: bold; font-size: 1.2rem; cursor: pointer; transition: color 0.2s; }
         .device-name:hover { color: #bb86fc; }
-        .status-badge { padding: 4px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: bold; color: #000; }
+        .hardware-name { font-size: 0.75rem; color: #888; font-style: italic; }
+        .status-badge { padding: 4px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: bold; color: #000; display: inline-block; text-align: center; }
         
         .disconnect-btn { background: transparent; border: 1px solid #cf6679; color: #cf6679; width: auto; padding: 5px 10px; font-size: 0.8rem; }
         .disconnect-btn:hover { background: #cf6679; color: black; }
@@ -96,6 +97,7 @@
             let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
             saved[strip.id] = { 
                 name: strip.customName, 
+                hardwareName: strip.hardwareName, // NEW: Saving the original hardware name
                 color: strip.currentColor, 
                 bright: strip.currentBrightness,
                 isOn: strip.isOn,
@@ -109,7 +111,8 @@
             connectedStrips.push({
                 id: id,
                 customName: profile.name || "Saved Strip",
-                device: deviceObj, // Might be null if browser blocked background load
+                hardwareName: profile.hardwareName || "Unknown Hardware",
+                device: deviceObj, 
                 characteristic: null, 
                 currentColor: profile.color || "#ffffff",
                 currentBrightness: profile.bright || 100,
@@ -124,7 +127,6 @@
         window.addEventListener('load', async () => {
             let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
 
-            // 1. Try Experimental API first
             if (navigator.bluetooth && navigator.bluetooth.getDevices) {
                 try {
                     const devices = await navigator.bluetooth.getDevices();
@@ -136,7 +138,6 @@
                 } catch (e) { console.error("Auto-load failed", e); }
             }
 
-            // 2. Load anything from Local Storage that the API missed or blocked
             for (let id in saved) {
                 if (!connectedStrips.find(s => s.id === id)) {
                     createOfflineStrip(id, saved[id], null);
@@ -171,7 +172,7 @@
                 try {
                     await characteristic.writeValue(data);
                     await new Promise(r => setTimeout(r, 40)); 
-                } catch (e) {} // Suppress minor write errors to keep smooth loops going
+                } catch (e) {} 
             }
         }
 
@@ -245,7 +246,6 @@
             renderDeviceCards();
             globalStatus.innerText = `Connected: ${stripObj.customName}`;
             
-            // Resume previous state immediately!
             if (stripObj.isOn) {
                 if (stripObj.effectMode === "static") {
                     sendData(writeChar, createPayloads(stripObj.currentColor, stripObj.currentBrightness));
@@ -273,6 +273,7 @@
                 const stripObj = {
                     id: device.id,
                     customName: profile.name,
+                    hardwareName: device.name || "Unknown Hardware", // NEW: Save hardware name on first pair
                     device: device,
                     characteristic: null,
                     currentColor: profile.color,
@@ -294,7 +295,7 @@
             }
         });
 
-        // Smart Reconnect: Uses the API if allowed, otherwise asks user to click via popup
+        // NEW: Filtered Reconnection logic
         async function reconnectDevice(deviceId) {
             const strip = connectedStrips.find(s => s.id === deviceId);
             if (!strip) return;
@@ -302,15 +303,19 @@
             try {
                 let deviceToConnect = strip.device;
                 
-                // If browser blocked background access, trigger the popup menu
                 if (!deviceToConnect) {
-                    globalStatus.innerText = "Please select your device from the popup...";
-                    deviceToConnect = await navigator.bluetooth.requestDevice({ 
-                        acceptAllDevices: true, 
-                        optionalServices: SERVICES 
-                    });
+                    globalStatus.innerText = `Select your hardware (${strip.hardwareName}) from the popup...`;
                     
-                    // If hardware ID cycled, migrate the saved profile to the new ID
+                    // Tell Chrome to ONLY show devices matching the hardware name we saved
+                    let options = { optionalServices: SERVICES };
+                    if (strip.hardwareName && strip.hardwareName !== "Unknown Hardware" && strip.hardwareName !== "Saved Strip") {
+                        options.filters = [{ name: strip.hardwareName }];
+                    } else {
+                        options.acceptAllDevices = true;
+                    }
+
+                    deviceToConnect = await navigator.bluetooth.requestDevice(options);
+                    
                     if (deviceToConnect.id !== strip.id) {
                         let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
                         saved[deviceToConnect.id] = saved[strip.id];
@@ -324,7 +329,7 @@
                 await establishConnection(deviceToConnect, strip);
             } catch (e) {
                 console.error(e);
-                globalStatus.innerText = "Reconnect cancelled.";
+                globalStatus.innerText = "Reconnect cancelled or failed.";
             }
         }
 
@@ -419,14 +424,16 @@
                 const card = document.createElement('div');
                 card.className = `device-card ${strip.isConnected ? '' : 'offline-card'}`;
                 
+                // NEW: Added hardwareName display
                 let cardContent = `
                     <div class="device-header">
                         <div class="name-group">
                             <span class="device-name" title="Click to rename" onclick="renameDevice('${strip.id}')">${strip.customName} ✎</span>
-                            <span class="status-badge" id="badge-${strip.id}" style="background-color: ${strip.isConnected ? (strip.isOn ? '#03dac6' : '#cf6679') : '#555'}">
-                                ${strip.isConnected ? (strip.isOn ? 'ON' : 'OFF') : 'OFFLINE'}
-                            </span>
+                            <span class="hardware-name">Hardware ID: ${strip.hardwareName}</span>
                         </div>
+                        <span class="status-badge" id="badge-${strip.id}" style="background-color: ${strip.isConnected ? (strip.isOn ? '#03dac6' : '#cf6679') : '#555'}">
+                            ${strip.isConnected ? (strip.isOn ? 'ON' : 'OFF') : 'OFFLINE'}
+                        </span>
                     </div>
                 `;
 
