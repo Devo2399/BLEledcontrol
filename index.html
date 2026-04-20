@@ -3,19 +3,31 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Yorick BLE - Golden Hub</title>
+    <title>Yorick BLE - Ultimate Hardware Hub</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        h1, h2, h3 { color: #ffffff; text-align: center; margin: 10px 0; }
         .panel { background: #1e1e1e; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.6); width: 100%; max-width: 600px; margin-bottom: 20px; }
         .device-card { background: #2a2a2a; border-left: 5px solid #6200ee; padding: 15px; margin-top: 15px; border-radius: 8px; }
-        .offline-card { border-left: 5px solid #555; opacity: 0.7; }
-        button { background: #6200ee; color: white; border: none; padding: 12px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; margin: 5px 0; }
+        .offline-card { border-left: 5px solid #555; opacity: 0.8; }
+        
+        button { background: #6200ee; color: white; border: none; padding: 12px; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; margin: 5px 0; transition: background 0.3s; }
+        button:hover { background: #7c4dff; }
+        .btn-row { display: flex; gap: 10px; }
         .btn-on { background: #03dac6; color: #000; }
+        .btn-on:hover { background: #5df2d6; }
         .btn-off { background: #cf6679; color: #000; }
+        .btn-off:hover { background: #ff7597; }
+        
         .control-group { display: flex; align-items: center; justify-content: space-between; margin: 10px 0; gap: 10px; }
-        input[type="color"] { width: 45px; height: 40px; border: none; background: none; cursor: pointer; }
+        .control-group label { flex-shrink: 0; width: 85px; font-size: 0.9rem; }
+        input[type="color"] { width: 45px; height: 40px; border: none; background: none; cursor: pointer; padding: 0; }
         select { flex-grow: 1; padding: 10px; border-radius: 6px; background: #333; color: white; border: 1px solid #555; }
         input[type="range"] { flex-grow: 1; cursor: pointer; }
+        
+        .device-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; border-bottom: 1px solid #444; padding-bottom: 10px; }
+        .name-group { display: flex; flex-direction: column; cursor: pointer; }
+        .device-name { font-weight: bold; font-size: 1.2rem; }
         .hardware-name { font-size: 0.75rem; color: #888; font-style: italic; }
         .status-badge { padding: 4px 10px; border-radius: 12px; font-size: 0.7rem; font-weight: bold; color: #000; }
     </style>
@@ -26,183 +38,171 @@
 
     <div class="panel">
         <button id="addDeviceBtn">+ Pair New LED Strip</button>
-        <div id="globalStatus" style="text-align:center; font-size:0.8rem; color:#bb86fc; margin-top:10px;">Status: Standby</div>
+        <div id="globalStatus" style="text-align:center; font-size:0.8rem; color:#bb86fc; margin-top:10px;">Hardware Mode Only</div>
+        
         <hr style="border-color: #333; margin: 15px 0;">
-        <div class="btn-row" style="display:flex; gap:10px;">
-            <button id="globalOnBtn" class="btn-on" style="flex:1">ALL ON</button>
-            <button id="globalOffBtn" class="btn-off" style="flex:1">ALL OFF</button>
+        
+        <div class="btn-row">
+            <button id="globalOnBtn" class="btn-on">ALL ON</button>
+            <button id="globalOffBtn" class="btn-off">ALL OFF</button>
         </div>
     </div>
 
     <div class="panel" id="deviceListPanel" style="display: none;">
-        <h2>Individual Zones</h2>
+        <h2>Zones</h2>
         <div id="deviceContainer"></div>
     </div>
 
     <script>
         let connectedStrips = [];
-        // Exhaustive list of UUIDs to ensure the ELK-BLEDOB is found correctly
         const SERVICES = [0xFFD0, 0xFFE0, 0xFFB0, 0xFFF0, '0000ffd0-0000-1000-8000-00805f9b34fb'];
         const CHARS = [0xFFD5, 0xFFE1, 0xFFF3, 0xFFF4];
 
+        // FULL HARDWARE COMMAND MAP
         const HW_EFFECTS = {
-            "static": "Static Color",
-            "0x87": "7 Color Gradient",
-            "0x88": "Red Gradient", "0x89": "Green Gradient", "0x8a": "Blue Gradient",
-            "0x8b": "Yellow Gradient", "0x8c": "Cyan Gradient", "0x8d": "Purple Gradient", "0x8e": "White Gradient",
-            "0x8f": "Red/Green Gradient", "0x90": "Red/Blue Gradient", "0x91": "Green/Blue Gradient",
-            "0x92": "7 Color Strobe", "0x93": "Red Strobe", "0x94": "Green Strobe", "0x95": "Blue Strobe",
+            "static": "Solid Color",
+            "0x87": "Rainbow Fade",
+            "0x88": "Red Fade", "0x89": "Green Fade", "0x8a": "Blue Fade", "0x8b": "Yellow Fade",
+            "0x8c": "Cyan Fade", "0x8d": "Purple Fade", "0x8e": "White Fade",
+            "0x8f": "Red/Green Fade", "0x90": "Red/Blue Fade", "0x91": "Green/Blue Fade",
+            "0x92": "Rainbow Strobe", "0x93": "Red Strobe", "0x94": "Green Strobe", "0x95": "Blue Strobe",
             "0x96": "Yellow Strobe", "0x97": "Cyan Strobe", "0x98": "Purple Strobe", "0x99": "White Strobe",
-            "0x9a": "7 Color Jump", "0x9b": "3 Color Jump"
+            "0x9a": "Rainbow Jump", "0x9b": "7 Color Jump"
         };
 
-        function save() {
+        const POWER_ON = new Uint8Array([0x7e, 0x00, 0x04, 0xf0, 0x00, 0x01, 0xff, 0x00, 0xef]);
+        const POWER_OFF = new Uint8Array([0x7e, 0x00, 0x04, 0x00, 0x00, 0x00, 0xff, 0x00, 0xef]);
+
+        function saveProfiles() {
             let data = {};
-            connectedStrips.forEach(s => { data[s.id] = { name: s.name, hw: s.hwName, color: s.color, bright: s.bright, mode: s.mode, speed: s.speed, isOn: s.isOn }; });
-            localStorage.setItem('yorick_golden_vault', JSON.stringify(data));
+            connectedStrips.forEach(s => {
+                data[s.id] = { name: s.customName, hw: s.hardwareName, color: s.currentColor, bright: s.currentBrightness, mode: s.effectMode, speed: s.effectSpeed, isOn: s.isOn };
+            });
+            localStorage.setItem('yorick_final_profiles', JSON.stringify(data));
         }
 
-        async function write(strip, payloads) {
-            if (!strip.char) return;
+        async function sendCommand(strip, payloads) {
+            if (!strip.characteristic) return;
             for (let p of payloads) {
-                try { 
-                    await strip.char.writeValue(p); 
-                    // Small delay to let the cheap Bluetooth chip process the command
-                    await new Promise(r => setTimeout(r, 50)); 
-                } catch (e) { console.log("Write failed - Hardware ignored command"); }
+                try { await strip.characteristic.writeValue(p); await new Promise(r => setTimeout(r, 60)); } catch (e) {}
             }
         }
 
-        function getPayloads(strip) {
-            if (!strip.isOn) return [
-                new Uint8Array([0x56, 0x00, 0x00, 0x00, 0x00, 0xf0, 0xaa]), // Lotus Off
-                new Uint8Array([0x7e, 0x00, 0x04, 0x00, 0x00, 0x00, 0xff, 0x00, 0xef]) // ELK Off
-            ];
-            
-            if (strip.mode === "static") {
-                let r = parseInt(strip.color.slice(1,3), 16), g = parseInt(strip.color.slice(3,5), 16), b = parseInt(strip.color.slice(5,7), 16);
-                let s = strip.bright / 100;
-                let rS = Math.round(r*s), gS = Math.round(g*s), bS = Math.round(b*s);
-                return [
-                    new Uint8Array([0x7e, 0x00, 0x04, f0, 0x00, 0x01, ff, 0x00, ef]), // ELK Wake
-                    new Uint8Array([0x56, rS, gS, bS, 0x00, 0xf0, 0xaa]), // Lotus Color
-                    new Uint8Array([0x7e, 0x00, 0x05, 0x03, rS, gS, bS, 0x00, 0xef]) // ELK Color
-                ];
+        function buildPayloads(strip) {
+            if (!strip.isOn) return [POWER_OFF];
+            if (strip.effectMode === "static") {
+                let r = parseInt(strip.currentColor.slice(1,3), 16), g = parseInt(strip.currentColor.slice(3,5), 16), b = parseInt(strip.currentColor.slice(5,7), 16);
+                let s = strip.currentBrightness / 100;
+                return [POWER_ON, new Uint8Array([0x7e, 0x00, 0x05, 0x03, Math.round(r*s), Math.round(g*s), Math.round(b*s), 0x00, 0xef])];
             } else {
-                let speed = 101 - strip.speed; // Invert slider for hardware speed
-                return [
-                    new Uint8Array([0x7e, 0x00, 0x04, 0xf0, 0x00, 0x01, 0xff, 0x00, 0xef]), // ELK Wake
-                    new Uint8Array([0x7e, 0x00, 0x03, parseInt(strip.mode, 16), speed, 0x00, 0xff, 0x00, 0xef]) // ELK Effect
-                ];
+                let invSpeed = 101 - strip.effectSpeed; // Hardware speed: 1 is fast, 100 is slow
+                return [POWER_ON, new Uint8Array([0x7e, 0x00, 0x03, parseInt(strip.effectMode, 16), invSpeed, 0x00, 0xff, 0x00, 0xef])];
             }
         }
 
-        async function connect(device, strip) {
-            try {
-                const server = await device.gatt.connect();
-                let service, char;
-                for (let u of SERVICES) { try { service = await server.getPrimaryService(u); if (service) break; } catch (e) {} }
-                for (let u of CHARS) { try { char = await service.getCharacteristic(u); if (char) break; } catch (e) {} }
-                
-                strip.char = char;
-                strip.isConnected = true;
-                strip.device = device;
-                device.addEventListener('gattserverdisconnected', () => { strip.isConnected = false; render(); });
-                
-                render();
-                write(strip, getPayloads(strip));
-            } catch (e) { alert("Connection failed. Stand closer to the light."); }
+        async function connectDevice(device, stripObj) {
+            const server = await device.gatt.connect();
+            let service, char;
+            for (let u of SERVICES) { try { service = await server.getPrimaryService(u); if (service) break; } catch (e) {} }
+            for (let u of CHARS) { try { char = await service.getCharacteristic(u); if (char) break; } catch (e) {} }
+            stripObj.characteristic = char;
+            stripObj.isConnected = true;
+            device.addEventListener('gattserverdisconnected', () => { stripObj.isConnected = false; render(); });
+            render();
+            await sendCommand(stripObj, buildPayloads(stripObj));
         }
 
-        document.getElementById('addDeviceBtn').onclick = async () => {
-            try {
-                const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
-                let strip = { id: device.id, name: device.name || "New Strip", hwName: device.name || "ELK-BLEDOB", color: "#ffffff", bright: 100, mode: "static", speed: 50, isOn: true, isConnected: false };
-                connectedStrips.push(strip);
-                save();
-                await connect(device, strip);
-            } catch (e) {}
-        };
+        document.getElementById('addDeviceBtn').addEventListener('click', async () => {
+            const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
+            let strip = { id: device.id, customName: device.name || "New Strip", hardwareName: device.name || "Unknown", device: device, currentColor: "#ffffff", currentBrightness: 100, effectMode: "static", effectSpeed: 50, isOn: true, isConnected: false, characteristic: null };
+            connectedStrips.push(strip);
+            saveProfiles();
+            await connectDevice(device, strip);
+        });
 
         function render() {
             const container = document.getElementById('deviceContainer');
             container.innerHTML = '';
             document.getElementById('deviceListPanel').style.display = connectedStrips.length ? 'block' : 'none';
 
-            connectedStrips.forEach(s => {
+            connectedStrips.forEach(strip => {
                 const card = document.createElement('div');
-                card.className = `device-card ${s.isConnected ? '' : 'offline-card'}`;
-                
+                card.className = `device-card ${strip.isConnected ? '' : 'offline-card'}`;
+                let effectOptions = Object.entries(HW_EFFECTS).map(([val, name]) => `<option value="${val}" ${strip.effectMode === val ? 'selected' : ''}>${name}</option>`).join('');
+
                 card.innerHTML = `
                     <div class="device-header">
-                        <div style="cursor:pointer" onclick="rename('${s.id}')">
-                            <span style="font-weight:bold; font-size:1.2rem;">${s.name} ✎</span><br>
-                            <span class="hardware-name">${s.hwName}</span>
+                        <div class="name-group" onclick="rename('${strip.id}')">
+                            <span class="device-name">${strip.customName} ✎</span>
+                            <span class="hardware-name">${strip.hardwareName}</span>
                         </div>
-                        <span class="status-badge" style="background:${s.isConnected ? (s.isOn ? '#03dac6' : '#cf6679') : '#555'}">
-                            ${s.isConnected ? (s.isOn ? 'ON' : 'OFF') : 'OFFLINE'}
+                        <span class="status-badge" style="background:${strip.isConnected ? (strip.isOn ? '#03dac6' : '#cf6679') : '#555'}">
+                            ${strip.isConnected ? (strip.isOn ? 'ON' : 'OFF') : 'OFFLINE'}
                         </span>
                     </div>
-                    ${s.isConnected ? `
-                        <div class="control-group"><label>Color:</label><input type="color" value="${s.color}" oninput="update('${s.id}','color',this.value)"></div>
-                        <div class="control-group"><label>Effect:</label><select onchange="update('${s.id}','mode',this.value)">
-                            ${Object.entries(HW_EFFECTS).map(([v,n]) => `<option value="${v}" ${s.mode===v?'selected':''}>${n}</option>`).join('')}
-                        </select></div>
-                        <div class="control-group"><label>Speed:</label><input type="range" min="1" max="100" value="${s.speed}" oninput="update('${s.id}','speed',this.value)"></div>
-                        <div class="control-group"><label>Bright:</label><input type="range" min="1" max="100" value="${s.bright}" oninput="update('${s.id}','bright',this.value)"></div>
-                        <div class="btn-row" style="display:flex; gap:10px;">
-                            <button onclick="update('${s.id}','on')" class="btn-on" style="flex:1">ON</button>
-                            <button onclick="update('${s.id}','off')" class="btn-off" style="flex:1">OFF</button>
+                    ${strip.isConnected ? `
+                        <div class="control-group"><label>Color:</label><input type="color" value="${strip.currentColor}" id="c-${strip.id}"></div>
+                        <div class="control-group"><label>Effect:</label><select id="e-${strip.id}">${effectOptions}</select></div>
+                        <div class="control-group"><label>Speed:</label><input type="range" min="1" max="100" value="${strip.effectSpeed}" id="s-${strip.id}"></div>
+                        <div class="control-group"><label>Brightness:</label><input type="range" min="1" max="100" value="${strip.currentBrightness}" id="b-${strip.id}"></div>
+                        <div class="btn-row">
+                            <button onclick="updateState('${strip.id}', 'on')" class="btn-on">ON</button>
+                            <button onclick="updateState('${strip.id}', 'off')" class="btn-off">OFF</button>
                         </div>
-                    ` : `
-                        <button onclick="rePair('${s.id}')" style="background:#03dac6; color:#000;">🔄 Reconnect to this Light</button>
-                    `}
-                    <button style="background:none; color:#888; font-size:0.65rem; margin-top:10px;" onclick="forget('${s.id}')">Forget Device</button>
+                    ` : `<button onclick="reconnect('${strip.id}')">🔄 Reconnect</button>`}
+                    <button style="background:none; color:#888; font-size:0.7rem; margin-top:10px;" onclick="remove('${strip.id}')">Forget Device</button>
                 `;
                 container.appendChild(card);
+
+                if (strip.isConnected) {
+                    document.getElementById(`c-${strip.id}`).oninput = (e) => updateState(strip.id, 'color', e.target.value);
+                    document.getElementById(`e-${strip.id}`).onchange = (e) => updateState(strip.id, 'mode', e.target.value);
+                    document.getElementById(`s-${strip.id}`).oninput = (e) => updateState(strip.id, 'speed', e.target.value);
+                    document.getElementById(`b-${strip.id}`).oninput = (e) => updateState(strip.id, 'bright', e.target.value);
+                }
             });
         }
 
-        window.update = (id, type, val) => {
+        window.updateState = async (id, type, val) => {
             let s = connectedStrips.find(x => x.id === id);
-            if (type === 'color') { s.color = val; s.mode = 'static'; s.isOn = true; }
-            if (type === 'mode') { s.mode = val; s.isOn = true; }
-            if (type === 'speed') { s.speed = val; s.isOn = true; }
-            if (type === 'bright') { s.bright = val; s.isOn = true; }
+            if (type === 'color') { s.currentColor = val; s.effectMode = 'static'; s.isOn = true; }
+            if (type === 'mode') { s.effectMode = val; s.isOn = true; }
+            if (type === 'speed') { s.effectSpeed = val; s.isOn = true; }
+            if (type === 'bright') { s.currentBrightness = val; s.isOn = true; }
             if (type === 'on') s.isOn = true;
             if (type === 'off') s.isOn = false;
-            save(); render(); write(s, getPayloads(s));
+            saveProfiles();
+            render();
+            await sendCommand(s, buildPayloads(s));
         };
 
         window.rename = (id) => {
             let s = connectedStrips.find(x => x.id === id);
-            let n = prompt("Enter a name for this zone (e.g. Bed, Desk):", s.name); 
-            if(n) { s.name = n; save(); render(); }
+            let n = prompt("New name:", s.customName);
+            if (n) { s.customName = n; saveProfiles(); render(); }
         };
 
-        window.forget = (id) => {
+        window.remove = (id) => {
             connectedStrips = connectedStrips.filter(x => x.id !== id);
-            save(); render();
+            saveProfiles(); render();
         };
 
-        window.rePair = async (id) => {
+        window.reconnect = async (id) => {
+            let s = connectedStrips.find(x => x.id === id);
             try {
-                let s = connectedStrips.find(x => x.id === id);
-                // Simple reconnection using the working "All Devices" method
-                const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
-                await connect(device, s);
+                const dev = await navigator.bluetooth.requestDevice({ filters: [{ name: s.hardwareName }], optionalServices: SERVICES });
+                await connectDevice(dev, s);
             } catch (e) {}
         };
 
-        window.onload = () => {
-            let saved = JSON.parse(localStorage.getItem('yorick_golden_vault')) || {};
-            for (let id in saved) { connectedStrips.push({ id, ...saved[id], isConnected: false }); }
-            render();
-            document.getElementById('globalStatus').innerText = "Loaded " + connectedStrips.length + " zones.";
-        };
+        document.getElementById('globalOnBtn').onclick = () => connectedStrips.forEach(s => updateState(s.id, 'on'));
+        document.getElementById('globalOffBtn').onclick = () => connectedStrips.forEach(s => updateState(s.id, 'off'));
 
-        document.getElementById('globalOnBtn').onclick = () => connectedStrips.forEach(s => { if(s.isConnected) update(s.id, 'on') });
-        document.getElementById('globalOffBtn').onclick = () => connectedStrips.forEach(s => { if(s.isConnected) update(s.id, 'off') });
+        window.onload = () => {
+            let saved = JSON.parse(localStorage.getItem('yorick_final_profiles')) || {};
+            for (let id in saved) { connectedStrips.push({ id, ...saved[id], isConnected: false, device: null, characteristic: null }); }
+            render();
+        };
     </script>
 </body>
 </html>
