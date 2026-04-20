@@ -3,90 +3,256 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Yorick BLE Controller - Universal Scan</title>
+    <title>Yorick BLE - Multi-Zone Controller</title>
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; background: #121212; color: white; margin: 0; }
-        .card { background: #1e1e1e; padding: 2rem; border-radius: 15px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.5); width: 300px; }
-        button { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: none; background: #6200ee; color: white; cursor: pointer; font-weight: bold; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        h1, h2, h3 { color: #ffffff; text-align: center; margin: 10px 0; }
+        .panel { background: #1e1e1e; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.6); width: 100%; max-width: 500px; margin-bottom: 20px; }
+        .device-card { background: #2a2a2a; border-left: 5px solid #6200ee; padding: 15px; margin-top: 15px; border-radius: 8px; }
+        
+        button { background: #6200ee; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; margin: 5px 0; transition: background 0.3s; }
         button:hover { background: #7c4dff; }
-        button:disabled { background: #444; cursor: not-allowed; }
-        input[type="color"] { width: 100%; height: 80px; border: none; background: none; cursor: pointer; margin: 15px 0; }
-        .status { font-size: 0.8rem; color: #bb86fc; margin-top: 10px; }
+        button:disabled { background: #444; cursor: not-allowed; color: #888; }
+        .btn-row { display: flex; gap: 10px; }
+        
+        .control-group { display: flex; align-items: center; justify-content: space-between; margin: 10px 0; }
+        input[type="color"] { width: 60px; height: 40px; border: none; background: none; cursor: pointer; }
+        input[type="range"] { flex-grow: 1; margin: 0 15px; cursor: pointer; }
+        
+        .status-text { font-size: 0.85rem; color: #bb86fc; text-align: center; margin-top: 10px; }
+        .device-name { font-weight: bold; font-size: 1.1rem; margin-bottom: 10px; display: flex; justify-content: space-between; }
+        .disconnect-btn { background: #cf6679; width: auto; padding: 5px 10px; font-size: 0.8rem; }
+        .disconnect-btn:hover { background: #ff7597; }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h2>LED Control</h2>
-        <button id="connect">Find Bluetooth Device</button>
-        <p style="font-size: 0.7rem; color: #aaa;">Scan may take a moment. Choose your LED strip from the list.</p>
+
+    <h1>Yorick LED Hub</h1>
+
+    <div class="panel">
+        <h2>Global Controls (All Devices)</h2>
+        <button id="addDeviceBtn">+ Add / Pair New LED Strip</button>
+        <div class="status-text" id="globalStatus">0 Devices Connected</div>
         
-        <input type="color" id="color" value="#ff0000" disabled>
+        <hr style="border-color: #333; margin: 15px 0;">
         
-        <button class="fx" data-hex="56ffffff00f0aa" disabled>Set White</button>
-        <button class="fx" data-hex="5600000000f0aa" disabled>Power Off</button>
-        
-        <div id="status" class="status">Status: Disconnected</div>
+        <div class="control-group">
+            <label>Master Color:</label>
+            <input type="color" id="globalColor" value="#ff0000">
+        </div>
+        <div class="control-group">
+            <label>Master Brightness:</label>
+            <input type="range" id="globalBrightness" min="0" max="100" value="100">
+        </div>
+        <div class="btn-row">
+            <button class="global-fx" data-hex="56ffffff00f0aa">All White</button>
+            <button class="global-fx" data-hex="5600000000f0aa">All Off</button>
+        </div>
+    </div>
+
+    <div class="panel" id="deviceListPanel" style="display: none;">
+        <h2>Individual Zones</h2>
+        <div id="deviceContainer"></div>
     </div>
 
     <script>
-        // Common UUIDs for Generic, Lotus, and Govee strips
-        const POSSIBLE_SERVICES = [0xFFD0, 0xFFE0, "00010203-0405-0607-0809-0a0b0c0d0e0f"];
-        const WRITE_CHAR = 0xFFD5; // Most common write characteristic
+        // The Architect's Data Structure for Connected Devices
+        // We use an Array to hold 'device objects' containing the connection info
+        let connectedStrips = []; 
         
-        let writeCharacteristic = null;
+        const SERVICES = [0xFFD0, 0xFFE0, 0xFFB0, 0xFFF0, '0000ffd0-0000-1000-8000-00805f9b34fb'];
+        const CHARS = [0xFFD5, 0xFFE1, 0xFFF3, 0xFFF4];
 
-        document.getElementById('connect').addEventListener('click', async () => {
-            const statusLabel = document.getElementById('status');
+        const globalStatus = document.getElementById('globalStatus');
+        const deviceListPanel = document.getElementById('deviceListPanel');
+        const deviceContainer = document.getElementById('deviceContainer');
+
+        // Helper: Convert Hex + Brightness to Payload Bytes
+        function createPayload(hexColor, brightnessPercent) {
+            let r = parseInt(hexColor.slice(1,3), 16);
+            let g = parseInt(hexColor.slice(3,5), 16);
+            let b = parseInt(hexColor.slice(5,7), 16);
+            
+            // Scale the RGB values based on the brightness percentage
+            let scale = brightnessPercent / 100;
+            r = Math.round(r * scale);
+            g = Math.round(g * scale);
+            b = Math.round(b * scale);
+            
+            return new Uint8Array([0x56, r, g, b, 0x00, 0xf0, 0xaa]);
+        }
+
+        // Helper: Send data to a specific characteristic
+        async function sendData(characteristic, dataArray) {
             try {
-                statusLabel.innerText = "Status: Scanning...";
-                
-                // REWRITE: acceptAllDevices set to true to find everything 
+                await characteristic.writeValue(dataArray);
+            } catch (e) {
+                console.error("Write failed", e);
+            }
+        }
+
+        // --- PAIRING LOGIC ---
+        document.getElementById('addDeviceBtn').addEventListener('click', async () => {
+            try {
+                globalStatus.innerText = "Scanning for new device...";
                 const device = await navigator.bluetooth.requestDevice({
                     acceptAllDevices: true,
-                    optionalServices: POSSIBLE_SERVICES
+                    optionalServices: SERVICES
                 });
 
-                statusLabel.innerText = `Status: Connecting to ${device.name}...`;
+                // Check if already connected
+                if (connectedStrips.find(s => s.device.id === device.id)) {
+                    globalStatus.innerText = "Device already added!";
+                    return;
+                }
+
+                globalStatus.innerText = `Connecting to ${device.name}...`;
                 const server = await device.gatt.connect();
                 
-                // Try the most common service first
-                const service = await server.getPrimaryService(0xFFD0);
-                writeCharacteristic = await service.getCharacteristic(WRITE_CHAR);
+                let service = null;
+                for (const uuid of SERVICES) {
+                    try { service = await server.getPrimaryService(uuid); if (service) break; } catch (e) {}
+                }
+                if (!service) throw new Error("No compatible service found.");
 
-                statusLabel.innerText = `Status: Connected to ${device.name}`;
-                document.getElementById('color').disabled = false;
-                document.querySelectorAll('.fx').forEach(b => b.disabled = false);
+                let writeChar = null;
+                for (const uuid of CHARS) {
+                    try { writeChar = await service.getCharacteristic(uuid); if (writeChar) break; } catch (e) {}
+                }
+                if (!writeChar) throw new Error("No write permissions.");
+
+                // Store the successful connection in our array
+                const stripObj = {
+                    id: device.id,
+                    name: device.name || "Unknown Strip",
+                    device: device,
+                    characteristic: writeChar,
+                    currentColor: "#ff0000",
+                    currentBrightness: 100
+                };
+                connectedStrips.push(stripObj);
                 
-                device.addEventListener('gattserverdisconnected', () => {
-                    statusLabel.innerText = "Status: Connection Lost";
-                    document.getElementById('color').disabled = true;
-                });
+                // Set up disconnection listener
+                device.addEventListener('gattserverdisconnected', () => handleDisconnect(device.id));
 
-            } catch (error) {
-                console.error(error);
-                statusLabel.innerText = "Status: Error (Check Console)";
-                alert("Scan cancelled or failed. Ensure Bluetooth is ON and you are using HTTPS.");
+                updateUI();
+                globalStatus.innerText = `Successfully added ${stripObj.name}`;
+
+            } catch (err) {
+                console.error(err);
+                globalStatus.innerText = err.message.includes("cancelled") ? "Scan cancelled." : "Pairing failed. Check console.";
             }
         });
 
-        document.getElementById('color').addEventListener('input', async (e) => {
-            if (!writeCharacteristic) return;
-            const r = parseInt(e.target.value.slice(1, 3), 16);
-            const g = parseInt(e.target.value.slice(3, 5), 16);
-            const b = parseInt(e.target.value.slice(5, 7), 16);
+        // --- DISCONNECT LOGIC ---
+        function handleDisconnect(deviceId) {
+            connectedStrips = connectedStrips.filter(s => s.device.id !== deviceId);
+            updateUI();
+            globalStatus.innerText = "A device disconnected.";
+        }
+
+        function disconnectDevice(deviceId) {
+            const strip = connectedStrips.find(s => s.device.id === deviceId);
+            if (strip && strip.device.gatt.connected) {
+                strip.device.gatt.disconnect(); // This triggers handleDisconnect automatically
+            }
+        }
+
+        // --- GLOBAL CONTROLS ---
+        document.getElementById('globalColor').addEventListener('input', (e) => {
+            const color = e.target.value;
+            const bright = document.getElementById('globalBrightness').value;
+            const payload = createPayload(color, bright);
             
-            // Standard Lotus payload [cite: 247]
-            const data = new Uint8Array([0x56, r, g, b, 0x00, 0xf0, 0xaa]);
-            await writeCharacteristic.writeValue(data);
+            connectedStrips.forEach(strip => {
+                strip.currentColor = color;
+                sendData(strip.characteristic, payload);
+            });
+            // Re-render to update individual sliders
+            updateUI(); 
         });
 
-        document.querySelectorAll('.fx').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                if (!writeCharacteristic) return;
+        document.getElementById('globalBrightness').addEventListener('input', (e) => {
+            const bright = e.target.value;
+            const color = document.getElementById('globalColor').value;
+            const payload = createPayload(color, bright);
+            
+            connectedStrips.forEach(strip => {
+                strip.currentBrightness = bright;
+                sendData(strip.characteristic, payload);
+            });
+            updateUI();
+        });
+
+        document.querySelectorAll('.global-fx').forEach(btn => {
+            btn.addEventListener('click', () => {
                 const bytes = btn.dataset.hex.match(/[0-9a-f]{2}/gi).map(h => parseInt(h, 16));
-                await writeCharacteristic.writeValue(new Uint8Array(bytes));
+                const payload = new Uint8Array(bytes);
+                connectedStrips.forEach(strip => sendData(strip.characteristic, payload));
             });
         });
+
+        // --- DYNAMIC UI RENDERING ---
+        function updateUI() {
+            deviceContainer.innerHTML = ''; // Clear current list
+            
+            if (connectedStrips.length === 0) {
+                deviceListPanel.style.display = 'none';
+                globalStatus.innerText = "0 Devices Connected";
+                return;
+            }
+
+            deviceListPanel.style.display = 'block';
+            globalStatus.innerText = `${connectedStrips.length} Device(s) Connected`;
+
+            connectedStrips.forEach(strip => {
+                const card = document.createElement('div');
+                card.className = 'device-card';
+                
+                card.innerHTML = `
+                    <div class="device-name">
+                        <span>${strip.name}</span>
+                        <button class="disconnect-btn" onclick="disconnectDevice('${strip.id}')">Disconnect</button>
+                    </div>
+                    <div class="control-group">
+                        <label>Color:</label>
+                        <input type="color" value="${strip.currentColor}" id="color-${strip.id}">
+                    </div>
+                    <div class="control-group">
+                        <label>Brightness:</label>
+                        <input type="range" min="0" max="100" value="${strip.currentBrightness}" id="bright-${strip.id}">
+                    </div>
+                    <div class="btn-row">
+                        <button id="white-${strip.id}">White</button>
+                        <button id="off-${strip.id}">Off</button>
+                    </div>
+                `;
+                deviceContainer.appendChild(card);
+
+                // Attach event listeners for this specific card
+                document.getElementById(`color-${strip.id}`).addEventListener('input', (e) => {
+                    strip.currentColor = e.target.value;
+                    const payload = createPayload(strip.currentColor, strip.currentBrightness);
+                    sendData(strip.characteristic, payload);
+                });
+
+                document.getElementById(`bright-${strip.id}`).addEventListener('input', (e) => {
+                    strip.currentBrightness = e.target.value;
+                    const payload = createPayload(strip.currentColor, strip.currentBrightness);
+                    sendData(strip.characteristic, payload);
+                });
+
+                document.getElementById(`white-${strip.id}`).addEventListener('click', () => {
+                    const bytes = "56ffffff00f0aa".match(/[0-9a-f]{2}/gi).map(h => parseInt(h, 16));
+                    sendData(strip.characteristic, new Uint8Array(bytes));
+                });
+
+                document.getElementById(`off-${strip.id}`).addEventListener('click', () => {
+                    const bytes = "5600000000f0aa".match(/[0-9a-f]{2}/gi).map(h => parseInt(h, 16));
+                    sendData(strip.characteristic, new Uint8Array(bytes));
+                });
+            });
+        }
     </script>
 </body>
 </html>
