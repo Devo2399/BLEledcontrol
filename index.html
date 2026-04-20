@@ -44,7 +44,7 @@
     <div class="panel">
         <h2>Global Controls</h2>
         <button id="addDeviceBtn">+ Pair New LED Strip</button>
-        <div class="status-text" id="globalStatus">Checking for saved devices...</div>
+        <div class="status-text" id="globalStatus">Loading saved devices...</div>
         
         <hr style="border-color: #333; margin: 15px 0;">
         
@@ -71,7 +71,6 @@
     </div>
 
     <script>
-        // --- 1. CORE DATA & PERSISTENCE ---
         let connectedStrips = []; 
         const SERVICES = [0xFFD0, 0xFFE0, 0xFFB0, 0xFFF0, '0000ffd0-0000-1000-8000-00805f9b34fb'];
         const CHARS = [0xFFD5, 0xFFE1, 0xFFF3, 0xFFF4];
@@ -92,7 +91,7 @@
             globalPresetSelect.innerHTML += `<option value="${hex}">${name}</option>`;
         }
 
-        // Save complete state to Local Storage
+        // --- 1. CORE DATA & PERSISTENCE ---
         function saveProfile(strip) {
             let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
             saved[strip.id] = { 
@@ -106,40 +105,46 @@
             localStorage.setItem('yorick_led_profiles', JSON.stringify(saved));
         }
 
-        // Initialize known devices on page load
+        function createOfflineStrip(id, profile, deviceObj) {
+            connectedStrips.push({
+                id: id,
+                customName: profile.name || "Saved Strip",
+                device: deviceObj, // Might be null if browser blocked background load
+                characteristic: null, 
+                currentColor: profile.color || "#ffffff",
+                currentBrightness: profile.bright || 100,
+                isOn: profile.isOn ?? false,
+                effectMode: profile.effectMode || "static",
+                effectSpeed: profile.effectSpeed || 50,
+                effectTimer: null,
+                isConnected: false 
+            });
+        }
+
         window.addEventListener('load', async () => {
+            let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
+
+            // 1. Try Experimental API first
             if (navigator.bluetooth && navigator.bluetooth.getDevices) {
                 try {
                     const devices = await navigator.bluetooth.getDevices();
-                    let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
-
                     for (let device of devices) {
                         if (saved[device.id]) {
-                            let profile = saved[device.id];
-                            let stripObj = {
-                                id: device.id,
-                                customName: profile.name || "Saved Strip",
-                                device: device,
-                                characteristic: null, 
-                                currentColor: profile.color || "#ffffff",
-                                currentBrightness: profile.bright || 100,
-                                isOn: profile.isOn ?? false,
-                                effectMode: profile.effectMode || "static",
-                                effectSpeed: profile.effectSpeed || 50,
-                                effectTimer: null,
-                                isConnected: false // Offline initially
-                            };
-                            connectedStrips.push(stripObj);
+                            createOfflineStrip(device.id, saved[device.id], device);
                         }
                     }
-                    renderDeviceCards();
-                    globalStatus.innerText = connectedStrips.length > 0 ? "Saved devices loaded." : "0 Devices Connected";
-                } catch (e) {
-                    console.error("Auto-load failed", e);
-                }
-            } else {
-                globalStatus.innerText = "0 Devices Connected (Auto-reconnect not supported in this browser)";
+                } catch (e) { console.error("Auto-load failed", e); }
             }
+
+            // 2. Load anything from Local Storage that the API missed or blocked
+            for (let id in saved) {
+                if (!connectedStrips.find(s => s.id === id)) {
+                    createOfflineStrip(id, saved[id], null);
+                }
+            }
+
+            renderDeviceCards();
+            globalStatus.innerText = connectedStrips.length > 0 ? "Saved profiles loaded." : "0 Devices Connected";
         });
 
         // --- 2. HARDWARE COMMUNICATION ---
@@ -166,17 +171,15 @@
                 try {
                     await characteristic.writeValue(data);
                     await new Promise(r => setTimeout(r, 40)); 
-                } catch (e) { console.error("BLE Write Error", e); }
+                } catch (e) {} // Suppress minor write errors to keep smooth loops going
             }
         }
 
         // --- 3. SOFTWARE EFFECTS ENGINE ---
-        // Helper: Convert HSL to RGB for smooth transitions
         function hslToRgb(h, s, l) {
             let r, g, b;
-            if (s === 0) {
-                r = g = b = l; 
-            } else {
+            if (s === 0) r = g = b = l; 
+            else {
                 const hue2rgb = (p, q, t) => {
                     if (t < 0) t += 1; if (t > 1) t -= 1;
                     if (t < 1/6) return p + (q - p) * 6 * t;
@@ -196,7 +199,6 @@
             if (strip.effectMode === "static" || !strip.isOn || !strip.isConnected) return;
 
             let tick = 0;
-            // Smooth effects need a fast update rate, choppy effects use a slower rate based on the slider
             let speedMs = strip.effectMode === "smooth_rainbow" ? Math.max(20, 100 - strip.effectSpeed) : Math.max(150, 1150 - (strip.effectSpeed * 10)); 
             
             strip.effectTimer = setInterval(() => {
@@ -209,7 +211,6 @@
                     let c = rainbow[tick % 6];
                     sendData(strip.characteristic, createPayloads(c, strip.currentBrightness));
                 } else if (strip.effectMode === "smooth_rainbow") {
-                    // Smoothly rotate hue from 0 to 1
                     let h = (tick % 360) / 360;
                     let [r, g, b] = hslToRgb(h, 1, 0.5);
                     let hex = "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
@@ -244,7 +245,7 @@
             renderDeviceCards();
             globalStatus.innerText = `Connected: ${stripObj.customName}`;
             
-            // Restore previous state automatically upon reconnection!
+            // Resume previous state immediately!
             if (stripObj.isOn) {
                 if (stripObj.effectMode === "static") {
                     sendData(writeChar, createPayloads(stripObj.currentColor, stripObj.currentBrightness));
@@ -260,14 +261,12 @@
             try {
                 const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
                 
-                // If it exists in our known list, just connect it
-                let existingStrip = connectedStrips.find(s => s.device.id === device.id);
+                let existingStrip = connectedStrips.find(s => s.device && s.device.id === device.id);
                 if (existingStrip) {
                     await establishConnection(device, existingStrip);
                     return;
                 }
 
-                // Brand new device setup
                 let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
                 let profile = saved[device.id] || { name: device.name || "New Strip", color: "#ffffff", bright: 100 };
 
@@ -295,20 +294,42 @@
             }
         });
 
-        // Triggered by clicking "Reconnect" on an offline card
+        // Smart Reconnect: Uses the API if allowed, otherwise asks user to click via popup
         async function reconnectDevice(deviceId) {
             const strip = connectedStrips.find(s => s.id === deviceId);
-            if (strip && strip.device) {
-                try {
-                    await establishConnection(strip.device, strip);
-                } catch (e) {
-                    alert("Could not reconnect. Make sure the device is plugged in and nearby.");
+            if (!strip) return;
+
+            try {
+                let deviceToConnect = strip.device;
+                
+                // If browser blocked background access, trigger the popup menu
+                if (!deviceToConnect) {
+                    globalStatus.innerText = "Please select your device from the popup...";
+                    deviceToConnect = await navigator.bluetooth.requestDevice({ 
+                        acceptAllDevices: true, 
+                        optionalServices: SERVICES 
+                    });
+                    
+                    // If hardware ID cycled, migrate the saved profile to the new ID
+                    if (deviceToConnect.id !== strip.id) {
+                        let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
+                        saved[deviceToConnect.id] = saved[strip.id];
+                        delete saved[strip.id];
+                        localStorage.setItem('yorick_led_profiles', JSON.stringify(saved));
+                        strip.id = deviceToConnect.id;
+                    }
+                    strip.device = deviceToConnect;
                 }
+
+                await establishConnection(deviceToConnect, strip);
+            } catch (e) {
+                console.error(e);
+                globalStatus.innerText = "Reconnect cancelled.";
             }
         }
 
         function handleDisconnect(deviceId) {
-            const strip = connectedStrips.find(s => s.device.id === deviceId);
+            const strip = connectedStrips.find(s => s.id === deviceId || (s.device && s.device.id === deviceId));
             if (strip) {
                 stopEffect(strip);
                 strip.isConnected = false;
@@ -320,7 +341,9 @@
 
         function forgetDevice(deviceId) {
             const strip = connectedStrips.find(s => s.id === deviceId);
-            if (strip && strip.isConnected && strip.device.gatt.connected) strip.device.gatt.disconnect();
+            if (strip && strip.isConnected && strip.device && strip.device.gatt.connected) {
+                strip.device.gatt.disconnect();
+            }
             
             connectedStrips = connectedStrips.filter(s => s.id !== deviceId);
             let saved = JSON.parse(localStorage.getItem('yorick_led_profiles')) || {};
@@ -344,7 +367,7 @@
 
         // --- 5. UI UPDATES & EVENTS ---
         function setStripState(strip, isOn, color = null, bright = null) {
-            if (!strip.isConnected) return; // Ignore offline clicks
+            if (!strip.isConnected) return; 
 
             strip.isOn = isOn;
             if (color) strip.currentColor = color;
@@ -407,7 +430,6 @@
                     </div>
                 `;
 
-                // If online, show controls. If offline, show reconnect button.
                 if (strip.isConnected) {
                     cardContent += `
                         <div class="control-group">
@@ -449,7 +471,6 @@
                     document.getElementById(`preset-${strip.id}`).value = Object.values(PRESETS).includes(strip.currentColor.toLowerCase()) ? strip.currentColor : "";
                     document.getElementById(`effect-${strip.id}`).value = strip.effectMode;
 
-                    // Event Listeners
                     document.getElementById(`color-${strip.id}`).addEventListener('input', (e) => setStripState(strip, true, e.target.value, null));
                     document.getElementById(`preset-${strip.id}`).addEventListener('change', (e) => {
                         if(e.target.value) setStripState(strip, true, e.target.value, null);
@@ -482,7 +503,7 @@
             if(e.target.value) {
                 document.getElementById('globalColor').value = e.target.value;
                 connectedStrips.forEach(s => { s.effectMode = "static"; setStripState(s, true, e.target.value, null); });
-                renderDevice/Cards();
+                renderDeviceCards();
             }
         });
         document.getElementById('globalBrightness').addEventListener('input', (e) => {
